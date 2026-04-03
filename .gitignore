@@ -1,0 +1,6 @@
+/.venv/
+/__pycache__/
+/models/
+/results/
+scripts/__pycache__/
+modal_kokoro_onnx_service.py
