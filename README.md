@@ -1,57 +1,56 @@
-# Kokoro TTS Servisi: Modal Üzerinde Kurulum ve Kullanım
+# Kokoro TTS/STT Servisi: Lokal ve Modal Kurulumu
 
-Bu repo, `modal_kokoro_service.py` dosyası üzerinden Kokoro tabanlı bir TTS servisini Modal'a deploy etmek için hazırlanmış bir baseline sunar. Servis, kısa metinleri GPU üzerinde toplu işleyerek `wav` ses dosyası üretir; ek olarak streaming endpoint ile ham `PCM16` ses akışı da verebilir.
+Bu repo artık tek bir servis içinde hem Kokoro tabanlı TTS hem de `faster-whisper` tabanlı STT sunar.
 
-Kodun temel hedefi yüksek eşzamanlılıkta stabil davranış elde etmektir:
+Ana yapı:
 
-- Modal konteynerlerini sıcak tutar
-- Konteyner içinde kuyruk ve micro-batching uygular
-- Tek tek request yerine batch forward pass çalıştırır
-- Aşırı yüklenmede bekleme süresini sonsuza uzatmak yerine `429` dönebilir
+- [combined_kokoro_service.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/combined_kokoro_service.py): ortak FastAPI uygulaması, TTS queue, STT queue, shared GPU gate
+- [local_kokoro_server.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/local_kokoro_server.py): lokal sunucu wrapper'ı
+- [modal_kokoro_service.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/modal_kokoro_service.py): Modal deployment wrapper'ı
 
-## 1. Mimari Özeti
+Servis şu endpoint'leri verir:
 
-`modal_kokoro_service.py` şu yapıda çalışır:
+- `/healthz`
+- `/warmup`
+- `/tts`
+- `/tts/stream`
+- `/stt`
 
-1. Modal bir image oluşturur.
-2. GPU'lu bir ASGI uygulaması ayağa kalkar.
-3. FastAPI endpoint'leri `BatchingEngine` üzerinden request alır.
-4. Request'ler konteyner içindeki asyncio kuyruğuna girer.
-5. Batch loop, kısa bir pencere boyunca request toplar.
-6. Aynı `voice`, `speed` ve `format` kombinasyonları gruplanır.
-7. Metinler önce phoneme dizisine çevrilir.
-8. GPU üzerinde tekil değil toplu inference çalışır.
-9. Sonuç `audio/wav` ya da stream için `pcm_s16le` olarak dönülür.
+## 1. Mimari Özet
 
-## 2. Dosya Ne Yapıyor?
+Mevcut mimari iki inference engine'i aynı servis içinde çalıştırır:
 
-Ana servis dosyası: [modal_kokoro_service.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/modal_kokoro_service.py)
+1. TTS tarafı `TTSBatchingEngine` ile request'leri konteyner içi kuyruğa alır.
+2. Kısa bir pencere boyunca request'ler toplanır ve micro-batch olarak GPU'ya gider.
+3. STT tarafı `STTEngine` ile ses upload'larını ayrı kuyruğa alır.
+4. `faster-whisper` modeli startup sırasında yüklenir.
+5. TTS ve STT aynı GPU'yu paylaşır.
+6. Çakışmayı sınırlamak için shared `asyncio.Semaphore` kullanılır.
 
-Bu dosya şu ana parçalardan oluşur:
+Bu yüzden servis aynı anda hem TTS hem STT kabul eder ama GPU tarafındaki gerçek paralellik `GPU_INFERENCE_PARALLELISM` ile kontrollü tutulur.
 
-- Modal uygulama ve image tanımı
-- Ortam değişkenlerinden config yükleme
-- `SynthesisRequest` veri sınıfı
-- `BatchingEngine` ile kuyruk, cache ve batch inference mantığı
-- FastAPI endpoint'leri: `/healthz`, `/warmup`, `/tts`, `/tts/stream`
+## 2. Gereksinimler
 
-## 3. Gereksinimler
-
-Python bağımlılıkları [requirements.txt](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/requirements.txt) içinde tanımlı:
+Python bağımlılıkları [requirements.txt](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/requirements.txt) içinde tanımlıdır:
 
 - `modal`
 - `fastapi`
 - `uvicorn`
 - `httpx`
+- `python-multipart`
 - `numpy`
 - `soundfile`
 - `kokoro`
 - `misaki[en]`
 - `torch`
+- `faster-whisper`
 
-Not: Mevcut bağımlılıklar English odaklı bir kurulum yapıyor. `LANG_CODE="a"` da buna uygun varsayılan değerdir.
+Notlar:
 
-## 4. Lokal Kurulum
+- `/stt` endpoint'i multipart upload kullandığı için `python-multipart` gereklidir.
+- Modal tarafında ayrıca CUDA runtime için `nvidia-cublas-cu12` ve `nvidia-cudnn-cu12` image içine eklenir.
+
+## 3. Lokal Kurulum
 
 ```bash
 python3 -m venv .venv
@@ -59,21 +58,21 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Lokalde aşağıdaki dosya ile servisi çalıştırın:
+Lokalde ilk deneme için küçük Whisper modeli kullanmak daha pratiktir:
 
 ```bash
-local_kokoro_server.py
+STT_MODEL=tiny GPU_INFERENCE_PARALLELISM=1 python local_kokoro_server.py
 ```
 
-Modal CLI girişi gerekli ise:
+Varsayılan lokal adres:
 
-```bash
-modal setup
+```text
+http://127.0.0.1:8000
 ```
 
-## 5. Modal Üzerinde Çalıştırma
+## 4. Modal Üzerinde Çalıştırma
 
-Gelişim modunda servis:
+Geliştirme modunda:
 
 ```bash
 modal serve modal_kokoro_service.py
@@ -85,193 +84,121 @@ Kalıcı deploy:
 modal deploy modal_kokoro_service.py
 ```
 
-Deploy sonrasında endpoint genel olarak şu formda olur:
+Varsayılan endpoint label:
 
 ```text
-https://<workspace>--<endpoint-label>.modal.run
+kokoro-tts
 ```
 
-Bu projede varsayılan endpoint label `kokoro-tts` olduğu için tam endpoint genelde şunlardan biri olur:
+Tipik URL:
 
 ```text
 https://<workspace>--kokoro-tts.modal.run
-https://<workspace>--kokoro-tts-dev.modal.run
 ```
 
 Kesin URL'yi `modal deploy` çıktısından alın.
 
-## 6. Ortam Değişkenleri
+## 5. Ortam Değişkenleri
 
-Servis davranışı tamamen ortam değişkenleri ile ayarlanabilir:
+### Genel servis ayarları
 
 | Değişken | Varsayılan | Açıklama |
 |---|---:|---|
-| `APP_NAME` | `kokoro-tts-short-requests` | Modal uygulama adı |
-| `ENDPOINT_LABEL` | `kokoro-tts` | `modal.asgi_app` label değeri |
-| `GPU_TYPE` | `L4` | Kullanılacak GPU tipi |
-| `MAX_CONTAINERS` | `10` | En fazla kaç GPU konteyner açılabileceği |
-| `MIN_CONTAINERS` | `8` | Sıcak tutulacak minimum konteyner sayısı |
-| `BUFFER_CONTAINERS` | `2` | Modal'in ekstra tampon konteyner hedefi |
-| `SCALEDOWN_WINDOW` | `300` | Boş kalan konteynerlerin ne kadar süre sonra kapanacağı, saniye |
-| `MAX_INPUTS` | `16` | Bir konteynerin aynı anda kabul edeceği maksimum input |
-| `TARGET_INPUTS` | `8` | Modal'in hedeflediği eşzamanlı input sayısı |
-| `MAX_QUEUE_SIZE` | `64` | Konteyner içi kuyruk limiti |
-| `BATCH_MAX_SIZE` | `8` | Bir batch içindeki maksimum request sayısı |
-| `BATCH_WAIT_MS` | `10` | Yeni request toplamak için batch bekleme süresi, milisaniye |
+| `APP_NAME` | `kokoro-tts-short-requests` | Modal app adı |
+| `ENDPOINT_LABEL` | `kokoro-tts` | Modal ASGI label |
+| `GPU_TYPE` | `L4` | Modal GPU tipi |
+| `MAX_CONTAINERS` | `10` | En fazla konteyner |
+| `MIN_CONTAINERS` | `8` | Sıcak tutulacak minimum konteyner |
+| `BUFFER_CONTAINERS` | `2` | Ek buffer konteyner hedefi |
+| `SCALEDOWN_WINDOW` | `300` | Boş konteyner kapanma süresi, saniye |
+| `MAX_INPUTS` | `16` | Konteyner başına eşzamanlı input limiti |
+| `TARGET_INPUTS` | `8` | Modal hedef concurrency değeri |
+| `GPU_INFERENCE_PARALLELISM` | `1` | TTS ve STT'nin aynı anda GPU inference başlatabilme limiti |
+| `MAX_AUDIO_BYTES` | `26214400` | `/stt` için maksimum upload boyutu |
+
+### TTS ayarları
+
+| Değişken | Varsayılan | Açıklama |
+|---|---:|---|
+| `MAX_QUEUE_SIZE` | `64` | TTS kuyruk limiti |
+| `BATCH_MAX_SIZE` | `8` | TTS batch boyutu |
+| `BATCH_WAIT_MS` | `10` | TTS batch toplama penceresi |
 | `DEFAULT_VOICE` | `af_heart` | Varsayılan voice |
-| `DEFAULT_SPEED` | `1.0` | Varsayılan konuşma hızı |
-| `LANG_CODE` | `a` | Kokoro pipeline dil kodu |
-| `MAX_TEXT_LENGTH` | `120` | `text` alanının izin verilen maksimum uzunluğu |
-| `LOCK_TO_DEFAULT_VOICE` | `1` | `1` ise voice değiştirilemez |
-| `LOCK_TO_DEFAULT_SPEED` | `1` | `1` ise speed değiştirilemez |
+| `DEFAULT_SPEED` | `1.0` | Varsayılan hız |
+| `LANG_CODE` | `a` | Kokoro dil kodu |
+| `MAX_TEXT_LENGTH` | `120` | `/tts` text alanı üst sınırı |
+| `LOCK_TO_DEFAULT_VOICE` | `1` | `1` ise voice sabitlenir |
+| `LOCK_TO_DEFAULT_SPEED` | `1` | `1` ise speed sabitlenir |
 
-### Örnek deploy komutu
+### STT ayarları
 
-Tek satırlık değişken geçişiyle deploy:
+| Değişken | Varsayılan | Açıklama |
+|---|---:|---|
+| `STT_MODEL` | `distil-large-v3` | Whisper modeli |
+| `STT_COMPUTE_TYPE` | boş | Boşsa GPU'da `float16`, CPU'da `int8` seçilir |
+| `STT_TASK` | `transcribe` | Varsayılan STT task'i |
+| `STT_LANGUAGE` | boş | Boş ise otomatik dil tespiti |
+| `STT_BEAM_SIZE` | `5` | Beam size |
+| `STT_ENABLE_VAD` | `1` | VAD filter açık mı |
+| `STT_WORD_TIMESTAMPS` | `0` | Kelime timestamp dönsün mü |
+| `STT_MAX_QUEUE_SIZE` | `32` | STT kuyruk limiti |
+| `STT_BATCH_MAX_SIZE` | `4` | STT batch toplama limiti |
+| `STT_BATCH_WAIT_MS` | `10` | STT batch bekleme süresi |
+| `STT_NUM_WORKERS` | `2` | `faster-whisper` worker sayısı |
+| `STT_USE_BATCHED_PIPELINE` | `0` | `BatchedInferencePipeline` kullanımı |
+| `STT_BATCH_SIZE` | `8` | Batched pipeline aktifse batch size |
+
+### Örnek Modal deploy
 
 ```bash
-APP_NAME=kokoro-tts-prod \
+APP_NAME=kokoro-tts-stt-prod \
 ENDPOINT_LABEL=kokoro-tts \
 GPU_TYPE=L4 \
-MIN_CONTAINERS=8 \
+MIN_CONTAINERS=4 \
 MAX_CONTAINERS=10 \
 BUFFER_CONTAINERS=2 \
 MAX_INPUTS=16 \
 TARGET_INPUTS=8 \
-BATCH_MAX_SIZE=8 \
-BATCH_WAIT_MS=10 \
-MAX_QUEUE_SIZE=64 \
-DEFAULT_VOICE=af_heart \
-DEFAULT_SPEED=1.0 \
-MAX_TEXT_LENGTH=120 \
-LOCK_TO_DEFAULT_VOICE=1 \
-LOCK_TO_DEFAULT_SPEED=1 \
+GPU_INFERENCE_PARALLELISM=1 \
+STT_MODEL=distil-large-v3 \
+STT_NUM_WORKERS=2 \
+STT_ENABLE_VAD=1 \
 modal deploy modal_kokoro_service.py
 ```
 
-## 7. GPU Opsiyonları
-
-Kodda `gpu=GPU_TYPE` kullanılıyor. Bu nedenle `GPU_TYPE` değişkenine Modal'in desteklediği GPU adlarından biri verilebilir.
-
-Bu servis için pratikte en anlamlı seçenekler:
-
-- `T4`: en ucuz baseline, throughput daha düşük
-- `L4`: fiyat/performans açısından iyi başlangıç noktası
-- `A10`: L4'e göre bazı iş yüklerinde daha güçlü alternatif
-- `A100`: daha yüksek throughput ve daha büyük batch denemeleri için
-- `H100`: bu servis tipi için genelde pahalı, ancak en güçlü seçenek
-
-Kısa TTS istekleri için genelde şu şekilde düşünebilirsiniz:
-
-- Maliyet öncelikliyse: `T4` veya `L4`
-- Dengeli başlangıç istiyorsanız: `L4`
-- Daha agresif benchmark hedefi varsa: `A10` veya `A100`
-
-Notlar:
-
-- Bu repodaki varsayılan seçim `L4`
-- GPU mevcutluğu workspace ve bölgeye göre değişebilir
-- Modal birden fazla fallback GPU da destekler, ancak bu dosyada tek string kullanılıyor
-
-Referanslar:
-
-- Modal GPU guide: https://modal.com/docs/guide/gpu
-- Modal GPU karşılaştırması: https://modal.com/blog/gpu-types
-- Fallback GPU örneği: https://frontend.modal.com/docs/examples/gpu_fallbacks
-
-## 8. Endpoint'ler
+## 6. Endpoint'ler
 
 ### `GET /healthz`
 
-Servisin ayakta olduğunu ve aktif config değerlerini gösterir.
+Servisin ayakta olduğunu ve aktif TTS/STT config'ini gösterir.
 
 Örnek:
 
 ```bash
-curl https://YOUR-ENDPOINT.modal.run/healthz
+curl http://127.0.0.1:8000/healthz
 ```
 
-Dönen alanlar arasında şunlar vardır:
+Dönen alanlardan bazıları:
 
-- `ok`
-- `gpu_type`
-- `max_containers`
-- `min_containers`
+- `runtime`
 - `batch_max_size`
-- `batch_wait_ms`
-- `target_inputs`
-- `max_inputs`
-- `max_text_length`
-- `lock_to_default_voice`
-- `lock_to_default_speed`
+- `gpu_inference_parallelism`
+- `stt_model`
+- `stt_compute_type`
+- `stt_device`
+- `max_audio_bytes`
 
 ### `POST /warmup`
 
-Modeli ve pipeline'i ısındırmak için bir deneme request'i gönderir.
+Hem TTS hem STT tarafını ısıtır.
 
 ```bash
-curl -X POST https://YOUR-ENDPOINT.modal.run/warmup
+curl -X POST http://127.0.0.1:8000/warmup
 ```
 
 ### `POST /tts`
 
 Standart TTS endpoint'i. Çıktı `audio/wav`.
-
-İstek gövdesi:
-
-```json
-{
-  "text": "Hello from Kokoro",
-  "voice": "af_heart",
-  "speed": 1.0,
-  "format": "wav"
-}
-```
-
-`curl` örneği:
-
-```bash
-curl -X POST https://YOUR-ENDPOINT.modal.run/tts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "The cat is sleeping.",
-    "voice": "af_heart",
-    "speed": 1.0,
-    "format": "wav"
-  }' \
-  --output out.wav
-```
-
-Python örneği:
-
-```python
-import requests
-
-resp = requests.post(
-    "https://YOUR-ENDPOINT.modal.run/tts",
-    json={
-        "text": "The cat is sleeping.",
-        "voice": "af_heart",
-        "speed": 1.0,
-        "format": "wav",
-    },
-    timeout=30,
-)
-resp.raise_for_status()
-
-with open("out.wav", "wb") as f:
-    f.write(resp.content)
-```
-
-Olası hatalar:
-
-- `400 voice_locked_for_benchmark`
-- `400 speed_locked_for_benchmark`
-- `429 container_queue_full`
-
-### `POST /tts/stream`
-
-Streaming endpoint'i. Bu endpoint `wav` dosyası dönmez; `24000 Hz`, mono, `pcm_s16le` parçaları stream eder.
 
 İstek:
 
@@ -284,189 +211,146 @@ Streaming endpoint'i. Bu endpoint `wav` dosyası dönmez; `24000 Hz`, mono, `pcm
 }
 ```
 
-Dönüş başlıkları:
+Örnek:
+
+```bash
+curl -X POST http://127.0.0.1:8000/tts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "The cat is sleeping.",
+    "voice": "af_heart",
+    "speed": 1.0,
+    "format": "wav"
+  }' \
+  --output out.wav
+```
+
+Olası hatalar:
+
+- `400 voice_locked_for_benchmark`
+- `400 speed_locked_for_benchmark`
+- `429 container_queue_full`
+
+### `POST /tts/stream`
+
+Bu endpoint `wav` container dönmez. `24000 Hz`, mono, `pcm_s16le` stream üretir.
+
+Örnek:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/tts/stream \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Streaming test",
+    "voice": "af_heart",
+    "speed": 1.0,
+    "format": "wav"
+  }'
+```
+
+Başlıklar:
 
 - `Content-Type: audio/L16; rate=24000; channels=1`
 - `X-Audio-Format: pcm_s16le`
 - `X-Sample-Rate: 24000`
 - `X-Channels: 1`
 
-Not:
+### `POST /stt`
 
-- Request içinde `format` alanı yine `wav` olmalı
-- Buna rağmen dönen veri `wav` container değil, ham PCM stream'dir
-- Canlı oynatma ya da düşük gecikmeli istemci tarafı tüketim için uygundur
+Multipart audio upload kabul eder. Yanıt JSON transcription sonucudur.
 
-## 9. Fonksiyonların Mantığı
-
-### `BatchingEngine.start()`
-
-- `torch` ve Kokoro sınıflarını yükler
-- Modeli GPU varsa `cuda`, yoksa `cpu` üzerine alır
-- Phoneme pipeline ve stream pipeline'i oluşturur
-- Varsayılan voice pack'i bellekte hazırlar
-- Batch worker task'ini başlatır
-- İlk warmup request'ini çalıştırır
-
-### `BatchingEngine.enqueue()`
-
-- Kuyruk doluysa `queue_full` hatası fırlatır
-- Her request için bir `Future` oluşturur
-- Request'i kuyruğa ekler
-- Sonucu asenkron şekilde bekler
-
-### `BatchingEngine._batch_loop()`
-
-- Kuyruktan ilk request'i alır
-- `BATCH_WAIT_MS` süresi boyunca ek request toplar
-- Batch boyutu `BATCH_MAX_SIZE` sınırına ulaşınca ya da süre dolunca işleme geçer
-
-### `BatchingEngine._run_batch()`
-
-- Batch içindeki request'leri `voice`, `speed`, `audio_format` kombinasyonuna göre gruplar
-- Her grup için phoneme üretir
-- Tek seferde `_synthesize_batch()` çağırır
-- Sonucu ilgili request future'larına yazar
-
-### `BatchingEngine._phonemize_one()`
-
-- Metni phoneme dizisine çevirir
-- Sonuçları LRU benzeri bir cache içinde tutar
-- Aynı metin tekrar geldiğinde phonemization maliyetini azaltır
-
-### `BatchingEngine._get_voice_pack()`
-
-- Voice pack daha önce yüklenmemişse pipeline üzerinden yükler
-- GPU belleğinde saklar
-- Tekrar kullanır
-
-### `BatchingEngine._synthesize_batch()`
-
-- Phoneme'leri model token'larına çevirir
-- Tensor'ları pad ederek ortak batch yapısına getirir
-- Voice referans embedding'lerini hazırlar
-- `_forward_batch()` ile GPU üzerinde toplu inference yapar
-- Sonucu `soundfile` ile `wav` byte dizisine çevirir
-
-### `BatchingEngine._forward_batch()`
-
-- Kokoro modelinin alt katmanlarını doğrudan batch olarak çağırır
-- Duration tahmini yapar
-- Alignment tensor'larını oluşturur
-- Decoder ile ses çıkışını üretir
-
-Bu bölüm, servisin yüksek throughput almasını sağlayan asıl kritik noktadır. Kod, tek tek `KPipeline(...)(text)` çağrısı yapmak yerine daha alt seviyede gerçek batch forward pass uygular.
-
-### `BatchingEngine.stream_synthesize()`
-
-- Streaming pipeline üzerinden parçalı audio üretir
-- Float audio'yu `int16 PCM` formatına çevirir
-- Chunk chunk istemciye yollar
-
-### `serve()`
-
-- FastAPI uygulamasını kurar
-- `startup` olayında engine'i başlatır
-- `shutdown` olayında engine'i durdurur
-- Tüm HTTP endpoint'lerini kaydeder
-
-## 10. Benchmark ve Örnek Yük Testi
-
-Repo içinde hazır bir yük testi script'i vardır: [scripts/load_test.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/scripts/load_test.py)
-
-Örnek kullanım:
+Örnek:
 
 ```bash
-python scripts/load_test.py \
-  --url https://YOUR-ENDPOINT.modal.run/tts \
-  --levels 1,10,50,100 \
-  --requests-per-level 200
+curl -X POST http://127.0.0.1:8000/stt \
+  -F "file=@out.wav" \
+  -F "task=transcribe"
 ```
 
-Warmup ile test:
+Dil ve word timestamps ile:
 
 ```bash
-python scripts/load_test.py \
-  --url https://YOUR-ENDPOINT.modal.run/tts \
-  --levels 1,10,50,100 \
-  --warmup-requests 20 \
-  --requests-per-level 200 \
-  --output-file results/run.json
+curl -X POST http://127.0.0.1:8000/stt \
+  -F "file=@sample.wav" \
+  -F "language=en" \
+  -F "task=transcribe" \
+  -F "beam_size=5" \
+  -F "vad_filter=true" \
+  -F "word_timestamps=true"
 ```
 
-Burst testi:
+Örnek response alanları:
+
+- `text`
+- `language`
+- `language_probability`
+- `duration`
+- `duration_after_vad`
+- `model`
+- `device`
+- `compute_type`
+- `segments`
+
+Olası hatalar:
+
+- `400 invalid_stt_task`
+- `400 empty_audio_upload`
+- `413 audio_too_large`
+- `429 container_queue_full`
+
+## 7. Lokal Test Akışı
+
+Sunucuyu başlatın:
 
 ```bash
-python scripts/load_test.py \
-  --url https://YOUR-ENDPOINT.modal.run/tts \
-  --levels 1,10,50,100 \
-  --burst-only
+STT_MODEL=tiny GPU_INFERENCE_PARALLELISM=1 python3 local_kokoro_server.py
 ```
 
-Script şu metrikleri raporlar:
-
-- `avg_ms`
-- `p50_ms`
-- `p95_ms`
-- `p99_ms`
-- `max_ms`
-- `ok`
-- `fail`
-
-## 11. Önerilen Başlangıç Ayarları
-
-Kısa metin ve benchmark odaklı kullanım için makul başlangıç:
-
-- `GPU_TYPE=L4`
-- `MIN_CONTAINERS=8`
-- `MAX_CONTAINERS=10`
-- `BUFFER_CONTAINERS=2`
-- `MAX_INPUTS=16`
-- `TARGET_INPUTS=8`
-- `MAX_QUEUE_SIZE=64`
-- `BATCH_MAX_SIZE=8`
-- `BATCH_WAIT_MS=10`
-- `DEFAULT_VOICE=af_heart`
-- `DEFAULT_SPEED=1.0`
-- `MAX_TEXT_LENGTH=120`
-
-## 12. Sınırlar ve Dikkat Edilecek Noktalar
-
-- Batch endpoint şu anda sadece `wav` çıkışı destekliyor
-- Stream endpoint `wav` değil ham PCM16 döndürüyor
-- Varsayılan konfigürasyon tek voice ve tek speed benchmark'ı kolaylaştırmak için kilitli
-- `MAX_TEXT_LENGTH` aşıldığında request Pydantic seviyesinde reddedilir
-- Konteyner içi kuyruk dolarsa `429` döner
-- `LANG_CODE` değiştirmek tek başına yeterli olmayabilir; ilgili phonemizer ve model uyumu gerekir
-
-## 13. Hangi Durumda Hangi Ayarı Değiştirmeli?
-
-- `429` artıyorsa: `MAX_QUEUE_SIZE`, `MIN_CONTAINERS`, `MAX_CONTAINERS` ve `TARGET_INPUTS` değerlerine bakın
-- GPU boş görünüyor ama throughput düşükse: `BATCH_MAX_SIZE` artırılabilir
-- Gecikme artıyorsa: `BATCH_WAIT_MS` ve `BATCH_MAX_SIZE` düşürülebilir
-- Çok farklı voice kullanılacaksa: voice pack önbellek davranışını izlemeniz gerekir
-- Uzun metin desteği gerekiyorsa: `MAX_TEXT_LENGTH` ve model context sınırları birlikte ele alınmalıdır
-
-## 14. Hızlı Başlangıç
+Sağlık kontrolü:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-modal serve modal_kokoro_service.py
+curl http://127.0.0.1:8000/healthz
 ```
 
-Yeni bir terminalde:
+TTS üretin:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/tts \
   -H "Content-Type: application/json" \
-  -d '{"text":"The cat is sleeping.","voice":"af_heart","speed":1.0,"format":"wav"}' \
+  -d '{"text":"Hello from Kokoro","voice":"af_heart","speed":1.0,"format":"wav"}' \
   --output out.wav
 ```
 
-Kalıcı deploy için:
+Üretilen dosyayı STT'ye geri verin:
 
 ```bash
-modal deploy modal_kokoro_service.py
+curl -X POST http://127.0.0.1:8000/stt \
+  -F "file=@out.wav" \
+  -F "task=transcribe"
 ```
+
+## 8. Concurrency Notları
+
+Bu servis iki farklı seviyede concurrency kullanır:
+
+- Modal seviyesi: `@modal.concurrent(max_inputs=..., target_inputs=...)`
+- Konteyner içi GPU seviyesi: `GPU_INFERENCE_PARALLELISM`
+
+Pratik öneri:
+
+- İlk kurulum için `GPU_INFERENCE_PARALLELISM=1` ile başlayın.
+- STT için önce `STT_MODEL=tiny` veya `small` ile test edin.
+- VRAM yeterliyse `STT_NUM_WORKERS` ve gerekirse `STT_USE_BATCHED_PIPELINE=1` deneyin.
+- Streaming TTS de aynı shared GPU gate'i kullandığı için yoğun trafik altında uzun stream'ler diğer işleri bekletebilir.
+
+## 9. Dosya Rolleri
+
+- [combined_kokoro_service.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/combined_kokoro_service.py): ortak servis mantığı
+- [modal_kokoro_service.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/modal_kokoro_service.py): Modal image ve deploy ayarları
+- [local_kokoro_server.py](/Users/sabrierendagdelen/Desktop/MEDYANES/Kokoro%20Modal/local_kokoro_server.py): lokal uvicorn entrypoint
+
+## 10. Referanslar
+
+- Faster Whisper repo: https://github.com/SYSTRAN/faster-whisper
+- Modal GPU guide: https://modal.com/docs/guide/gpu
+- Modal GPU comparison: https://modal.com/blog/gpu-types

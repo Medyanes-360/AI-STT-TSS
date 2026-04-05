@@ -4,3 +4,4 @@
 /results/
 scripts/__pycache__/
 modal_kokoro_onnx_service.py
+out.wav
