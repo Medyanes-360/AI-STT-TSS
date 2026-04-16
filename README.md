@@ -48,7 +48,7 @@ Python bağımlılıkları [requirements.txt](/Users/sabrierendagdelen/Desktop/M
 Notlar:
 
 - `/stt` endpoint'i multipart upload kullandığı için `python-multipart` gereklidir.
-- Modal tarafında ayrıca CUDA runtime için `nvidia-cublas-cu12` ve `nvidia-cudnn-cu12` image içine eklenir.
+- Modal tarafında CUDA runtime için `nvidia-cublas-cu12` ve `nvidia-cudnn-cu12` image içine eklenir; ayrıca `LD_LIBRARY_PATH` içine `nvidia.cuda_nvrtc.lib` yolu da eklenir.
 
 ## 3. Lokal Kurulum
 
@@ -71,6 +71,20 @@ http://127.0.0.1:8000
 ```
 
 ## 4. Modal Üzerinde Çalıştırma
+
+Önce sanal ortamı aktif edin:
+
+```bash
+source .venv/bin/activate
+```
+
+`modal` komutu bulunamazsa komutları `.venv/bin/modal ...` şeklinde çalıştırın.
+
+CLI profilini kontrol edin (workspace `ekip` için):
+
+```bash
+modal profile current
+```
 
 Geliştirme modunda:
 
@@ -98,6 +112,26 @@ https://<workspace>--kokoro-tts.modal.run
 
 Kesin URL'yi `modal deploy` çıktısından alın.
 
+`ekip` workspace örneği:
+
+```text
+https://ekip--kokoro-tts.modal.run
+```
+
+Deploy sonrası hızlı doğrulama:
+
+```bash
+curl https://ekip--kokoro-tts.modal.run/healthz
+```
+
+Log izleme:
+
+```bash
+modal app logs kokoro-tts-short-requests --since 10m --source stderr
+```
+
+Sık görülen startup hatası (`libnvrtc-builtins.so.13.0`): Bu repo içindeki güncel `modal_kokoro_service.py` ve `combined_kokoro_service.py` sürümleri NVRTC/CUDA lib yollarını otomatik ayarlar. Eski deploy kaldıysa tekrar `modal deploy modal_kokoro_service.py` çalıştırın.
+
 ## 5. Ortam Değişkenleri
 
 ### Genel servis ayarları
@@ -108,9 +142,9 @@ Kesin URL'yi `modal deploy` çıktısından alın.
 | `ENDPOINT_LABEL` | `kokoro-tts` | Modal ASGI label |
 | `GPU_TYPE` | `L4` | Modal GPU tipi |
 | `MAX_CONTAINERS` | `10` | En fazla konteyner |
-| `MIN_CONTAINERS` | `8` | Sıcak tutulacak minimum konteyner |
+| `MIN_CONTAINERS` | `0` | Sıcak tutulacak minimum konteyner |
 | `BUFFER_CONTAINERS` | `2` | Ek buffer konteyner hedefi |
-| `SCALEDOWN_WINDOW` | `300` | Boş konteyner kapanma süresi, saniye |
+| `SCALEDOWN_WINDOW` | `30` | Boş konteyner kapanma süresi, saniye |
 | `MAX_INPUTS` | `16` | Konteyner başına eşzamanlı input limiti |
 | `TARGET_INPUTS` | `8` | Modal hedef concurrency değeri |
 | `GPU_INFERENCE_PARALLELISM` | `1` | TTS ve STT'nin aynı anda GPU inference başlatabilme limiti |

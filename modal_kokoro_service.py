@@ -9,9 +9,9 @@ APP_NAME = os.getenv("APP_NAME", "kokoro-tts-short-requests")
 ENDPOINT_LABEL = os.getenv("ENDPOINT_LABEL", "kokoro-tts")
 GPU_TYPE = os.getenv("GPU_TYPE", "L4")
 MAX_CONTAINERS = int(os.getenv("MAX_CONTAINERS", "10"))
-MIN_CONTAINERS = int(os.getenv("MIN_CONTAINERS", "8"))
+MIN_CONTAINERS = int(os.getenv("MIN_CONTAINERS", "0"))
 BUFFER_CONTAINERS = int(os.getenv("BUFFER_CONTAINERS", "2"))
-SCALEDOWN_WINDOW = int(os.getenv("SCALEDOWN_WINDOW", "300"))
+SCALEDOWN_WINDOW = int(os.getenv("SCALEDOWN_WINDOW", "30"))
 MAX_INPUTS = int(os.getenv("MAX_INPUTS", "16"))
 TARGET_INPUTS = int(os.getenv("TARGET_INPUTS", "8"))
 MAX_QUEUE_SIZE = int(os.getenv("MAX_QUEUE_SIZE", "64"))
@@ -28,8 +28,18 @@ LOCK_TO_DEFAULT_SPEED = os.getenv("LOCK_TO_DEFAULT_SPEED", "1") == "1"
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("espeak-ng", "ffmpeg")
+    .add_local_file("combined_kokoro_service.py", "/root/combined_kokoro_service.py", copy=True)
     .pip_install_from_requirements("requirements.txt")
     .pip_install("nvidia-cublas-cu12", "nvidia-cudnn-cu12==9.*")
+    .run_commands(
+        "python -c \"from pathlib import Path; import shutil; "
+        "dst=Path('/usr/lib/x86_64-linux-gnu'); dst.mkdir(parents=True, exist_ok=True); "
+        "root=Path('/usr/local/lib/python3.11/site-packages/nvidia'); "
+        "patterns=('**/libnvrtc.so*','**/libnvrtc-builtins.so*'); "
+        "files=[p for pat in patterns for p in root.glob(pat) if p.is_file()]; "
+        "print('nvrtc_files', [str(p) for p in files]); "
+        "[(dst / p.name).exists() or ((dst / p.name).symlink_to(p) if not (dst / p.name).exists() else None) for p in files]\""
+    )
 )
 
 app = modal.App(APP_NAME)

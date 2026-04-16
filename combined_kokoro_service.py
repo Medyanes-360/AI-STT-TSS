@@ -1,6 +1,7 @@
 import asyncio
 import io
 import os
+import site
 import time
 from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
@@ -42,7 +43,13 @@ STT_BATCH_SIZE = int(os.getenv("STT_BATCH_SIZE", "8"))
 
 def _configure_cuda_library_path() -> None:
     lib_dirs: list[str] = []
-    for module_name in ("nvidia.cublas.lib", "nvidia.cudnn.lib"):
+
+    def add_lib_dir(path: Path) -> None:
+        resolved = str(path.resolve())
+        if resolved not in lib_dirs:
+            lib_dirs.append(resolved)
+
+    for module_name in ("nvidia.cublas.lib", "nvidia.cudnn.lib", "nvidia.cuda_nvrtc.lib"):
         try:
             module = __import__(module_name, fromlist=["__file__"])
         except ImportError:
@@ -50,9 +57,19 @@ def _configure_cuda_library_path() -> None:
         module_file = getattr(module, "__file__", None)
         if not module_file:
             continue
-        lib_dir = str(Path(module_file).resolve().parent)
-        if lib_dir not in lib_dirs:
-            lib_dirs.append(lib_dir)
+        add_lib_dir(Path(module_file).resolve().parent)
+
+    # Fallback: discover NVIDIA lib folders directly from site-packages.
+    patterns = ("libcublas.so*", "libcudnn.so*", "libnvrtc.so*", "libnvrtc-builtins.so*")
+    for site_root in site.getsitepackages():
+        nvidia_root = Path(site_root) / "nvidia"
+        if not nvidia_root.exists():
+            continue
+        for lib_dir in nvidia_root.rglob("lib"):
+            if not lib_dir.is_dir():
+                continue
+            if any(lib_dir.glob(pattern) for pattern in patterns):
+                add_lib_dir(lib_dir)
 
     if not lib_dirs:
         return
@@ -123,6 +140,7 @@ class TTSBatchingEngine:
         self.max_phoneme_cache = 10000
 
     async def start(self) -> None:
+        _configure_cuda_library_path()
         import torch
         from kokoro import KModel, KPipeline
 
